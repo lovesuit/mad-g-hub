@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs and runtime dumps
+*.log
+hub_error.log
+err.log
+
+# Environments and OS
+.env
+.venv
+env/
+venv/
+ENV/
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.user
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# PyInstaller / build artifacts
+build/
+dist/
+*.spec
