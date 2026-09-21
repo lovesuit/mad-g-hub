@@ -24,8 +24,8 @@ Desktop settings tool for MAD G mice using the PixArt PAW3395 sensor. It talks t
 Clone the repository and install the dependencies:
 
 ```bash
-git clone https://github.com/<your-username>/mad-hub-native.git
-cd mad-hub-native
+git clone https://github.com/lovesuit/mad-g-hub.git
+cd mad-g-hub
 pip install -r requirements.txt
 ```
 
