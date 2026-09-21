@@ -5,6 +5,7 @@ import time
 import math
 import threading
 import winreg
+import subprocess
 from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import (
@@ -620,7 +621,7 @@ class MainWindow(QMainWindow):
         self.worker.connection_changed.connect(self.on_connection_changed)
         self.worker.start()
 
-        self.bat_widget = BatteryWidget(self.worker)
+        self._widget_proc = None
 
     def init_window(self):
         self.setWindowTitle("MAD G Hub")
@@ -1114,9 +1115,15 @@ class MainWindow(QMainWindow):
 
     def _toggle_bat_widget(self, checked):
         if checked:
-            self.bat_widget.show()
+            if self._widget_proc is None or self._widget_proc.poll() is not None:
+                widget_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "widget.py")
+                self._widget_proc = subprocess.Popen([sys.executable, widget_path])
+                self.log_cli("battery widget started", "[+]")
         else:
-            self.bat_widget.hide()
+            if self._widget_proc and self._widget_proc.poll() is None:
+                self._widget_proc.terminate()
+                self._widget_proc = None
+                self.log_cli("battery widget stopped", "[-]")
 
     def _autostart_enabled(self):
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -1161,14 +1168,12 @@ class MainWindow(QMainWindow):
                 self.show_normal()
 
     def closeEvent(self, event):
-        self.bat_widget.close()
         self.worker.stop()
         self.worker.wait(1000)
         self.ctl.close()
         event.accept()
 
     def quit_app(self):
-        self.bat_widget.close()
         self.worker.stop()
         self.worker.wait(1000)
         self.ctl.close()
