@@ -4,6 +4,7 @@ import hid
 import time
 import math
 import threading
+import winreg
 from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import (
@@ -549,6 +550,47 @@ class ConsoleFrame(QFrame):
 
 
 
+class BatteryWidget(QWidget):
+    def __init__(self, worker):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnBottomHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._drag_pos = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.lbl = QLabel("[ --% ]", self)
+        self.lbl.setFont(QFont("Cascadia Mono", 11, QFont.Weight.Bold))
+        self.lbl.setStyleSheet("""
+            color: #00FF41;
+            background-color: #141418;
+            border: 1px solid #303036;
+            padding: 4px 10px;
+        """)
+        layout.addWidget(self.lbl)
+
+        worker.state_updated.connect(self._on_state)
+
+    def _on_state(self, state):
+        bat = state.get('battery', 0)
+        chg = " ⚡" if state.get('charging') else ""
+        self.lbl.setText(f"[ {bat}%{chg} ]")
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            self.move(self.pos() + event.globalPosition().toPoint() - self._drag_pos)
+            self._drag_pos = event.globalPosition().toPoint()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -577,6 +619,8 @@ class MainWindow(QMainWindow):
         self.worker.state_updated.connect(self.on_state_updated)
         self.worker.connection_changed.connect(self.on_connection_changed)
         self.worker.start()
+
+        self.bat_widget = BatteryWidget(self.worker)
 
     def init_window(self):
         self.setWindowTitle("MAD G Hub")
@@ -1047,6 +1091,19 @@ class MainWindow(QMainWindow):
         menu.addAction(hide_act)
         menu.addSeparator()
 
+        self.bat_widget_act = QAction("Battery Widget", self)
+        self.bat_widget_act.setCheckable(True)
+        self.bat_widget_act.setChecked(False)
+        self.bat_widget_act.toggled.connect(self._toggle_bat_widget)
+        menu.addAction(self.bat_widget_act)
+
+        autostart_act = QAction("Start with Windows", self)
+        autostart_act.setCheckable(True)
+        autostart_act.setChecked(self._autostart_enabled())
+        autostart_act.toggled.connect(self._set_autostart)
+        menu.addAction(autostart_act)
+        menu.addSeparator()
+
         quit_act = QAction("Quit", self)
         quit_act.triggered.connect(self.quit_app)
         menu.addAction(quit_act)
@@ -1054,6 +1111,43 @@ class MainWindow(QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def _toggle_bat_widget(self, checked):
+        if checked:
+            self.bat_widget.show()
+        else:
+            self.bat_widget.hide()
+
+    def _autostart_enabled(self):
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+            winreg.QueryValueEx(key, "MAD_G_Hub")
+            winreg.CloseKey(key)
+            return True
+        except OSError:
+            return False
+
+    def _set_autostart(self, enable):
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_ALL_ACCESS)
+            if enable:
+                if getattr(sys, 'frozen', False):
+                    path = f'"{sys.executable}"'
+                else:
+                    path = f'"{sys.executable}" "{os.path.abspath(sys.argv[0])}" --minimized'
+                winreg.SetValueEx(key, "MAD_G_Hub", 0, winreg.REG_SZ, path)
+                self.log_cli("autostart enabled", "[+]")
+            else:
+                try:
+                    winreg.DeleteValue(key, "MAD_G_Hub")
+                except FileNotFoundError:
+                    pass
+                self.log_cli("autostart disabled", "[-]")
+            winreg.CloseKey(key)
+        except Exception as e:
+            self.log_cli(f"autostart error: {e}", "[!]")
 
     def show_normal(self):
         self.show()
@@ -1067,12 +1161,14 @@ class MainWindow(QMainWindow):
                 self.show_normal()
 
     def closeEvent(self, event):
+        self.bat_widget.close()
         self.worker.stop()
         self.worker.wait(1000)
         self.ctl.close()
         event.accept()
 
     def quit_app(self):
+        self.bat_widget.close()
         self.worker.stop()
         self.worker.wait(1000)
         self.ctl.close()
