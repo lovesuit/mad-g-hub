@@ -13,7 +13,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QFrame,
-    QSystemTrayIcon, QMenu, QPlainTextEdit
+    QSystemTrayIcon, QMenu, QPlainTextEdit, QStackedWidget,
+    QComboBox, QColorDialog
 )
 
 COLOR_BG = QColor(0, 0, 0)
@@ -29,21 +30,60 @@ COLOR_TEXT_MUTED = QColor(165, 165, 172)
 
 
 class MouseController:
+    OP_GET_FIRMWARE = 0x80
+    OP_GET_MOUSE_INFO = 0x81
+    OP_SET_MOUSE_INFO = 0x01
+    OP_SET_REPORT_RATE = 0x20
+    OP_SET_DPI_STAGE = 0x21
+    OP_SET_RGB = 0x22
     OP_GET_CONFIG = 0x82
-    OP_GET_DPI_CONFIG = 0xa5
-    OP_GET_DPI_VAL = 0xa6
-    OP_GET_LIFT = 0xa8
-    OP_GET_SPECIAL = 0xaa
-
-    OP_SET_REPORT_RATE = 0x21
-    OP_SET_DPI_STAGE = 0x22
+    OP_SET_RGB_COLOR = 0x23
+    OP_GET_RGB_COLOR = 0xa3
+    OP_SET_KEY_MATRIX = 0x24
+    OP_GET_KEY_MATRIX = 0xa4
     OP_SET_DPI_CONFIG = 0x25
+    OP_GET_DPI_CONFIG = 0xa5
     OP_SET_DPI_VAL = 0x26
+    OP_GET_DPI_VAL = 0xa6
+    OP_SET_DPI_COLOR = 0x27
+    OP_GET_DPI_COLOR = 0xa7
     OP_SET_LIFT = 0x28
+    OP_GET_LIFT = 0xa8
     OP_SET_SPECIAL = 0x2a
+    OP_GET_SPECIAL = 0xaa
+    OP_SET_SLEEP_TIME = 0x2b
+    OP_GET_SLEEP_TIME = 0xab
+    OP_SET_KEY_DEBOUNCE = 0x2c
+    OP_GET_KEY_DEBOUNCE = 0xac
 
     RATE_MAP = {1000: 0x01, 500: 0x02, 250: 0x04, 125: 0x08}
     REV_RATE_MAP = {0x01: 1000, 0x02: 500, 0x04: 250, 0x08: 125}
+
+    SLEEP_CODES = [
+        (10, 0x01, "10S"),
+        (30, 0x03, "30S"),
+        (50, 0x05, "50S"),
+        (60, 0x06, "1M"),
+        (120, 0x0c, "2M"),
+        (900, 0x5a, "15M"),
+        (1800, 0xb4, "30M")
+    ]
+
+    DEBOUNCE_VALS = [1, 2, 4, 8, 15, 20, 30]
+
+    KEY_BINDINGS = [
+        ("Left Click", 0x02, 0x00, 0x00, 0xf0),
+        ("Right Click", 0x02, 0x00, 0x00, 0xf1),
+        ("Middle Click", 0x02, 0x00, 0x00, 0xf2),
+        ("Forward", 0x02, 0x00, 0x00, 0xf4),
+        ("Backward", 0x02, 0x00, 0x00, 0xf3),
+        ("DPI Cycle", 0x0b, 0x00, 0x00, 0x03),
+        ("DPI +", 0x0b, 0x00, 0x00, 0x02),
+        ("DPI -", 0x0b, 0x00, 0x00, 0x01),
+        ("Scroll Up", 0x02, 0x00, 0x00, 0xf5),
+        ("Scroll Down", 0x02, 0x00, 0x00, 0xf6),
+        ("Disabled", 0x00, 0x00, 0x00, 0x00),
+    ]
 
     WIRED_PIDS = {0x100d, 0x10c6}
     DONGLE_PIDS = {0x100f, 0x1010}
@@ -107,7 +147,7 @@ class MouseController:
                 self.device = None
                 self.current_pid = None
 
-    def _query(self, opcode, retries=15):
+    def _query(self, opcode, param1=0x00, retries=15):
         if not self.device:
             return None
         try:
@@ -116,11 +156,11 @@ class MouseController:
                 pass
             self.device.set_nonblocking(False)
 
-            pkt = bytes([0x00, opcode]) + bytes(63)
+            pkt = bytes([0x00, opcode, 0x00, param1]) + bytes(61)
             self.device.send_feature_report(pkt)
 
             for _ in range(retries):
-                r = self.device.read(64, timeout_ms=100)
+                r = self.device.read(64, timeout_ms=50)
                 if not r:
                     break
                 if r[0] == opcode:
@@ -156,6 +196,10 @@ class MouseController:
 
             rate_code = cfg[1]
             stage_idx = cfg[2]
+            rgb_effect = cfg[3]
+            rgb_brightness = cfg[4]
+            rgb_speed = cfg[5]
+            rgb_color = cfg[6]
             raw_bat = cfg[8]
             battery_pct = raw_bat & 0x7F
             is_charging = bool(raw_bat & 0x80)
@@ -181,6 +225,31 @@ class MouseController:
                 angle_snapping = bool(b & 0x02)
                 ripple = bool(b & 0x04)
 
+            debounce = 4
+            deb_pkt = self._query(self.OP_GET_KEY_DEBOUNCE)
+            if deb_pkt:
+                debounce = deb_pkt[1]
+
+            sleep_code = 1
+            slp_pkt = self._query(self.OP_GET_SLEEP_TIME)
+            if slp_pkt:
+                sleep_code = slp_pkt[1]
+
+            stage_colors = []
+            for s in range(6):
+                cpkt = self._query(self.OP_GET_DPI_COLOR, param1=s)
+                if cpkt and len(cpkt) >= 4:
+                    stage_colors.append((cpkt[1], cpkt[2], cpkt[3]))
+                else:
+                    stage_colors.append((0, 255, 65))
+
+            key_matrix = []
+            km_pkt = self._query(self.OP_GET_KEY_MATRIX)
+            if km_pkt and len(km_pkt) >= 25:
+                for k in range(6):
+                    chunk = km_pkt[1 + k*4 : 1 + (k+1)*4]
+                    key_matrix.append((chunk[3], chunk[2], chunk[1], chunk[0]))
+
             return {
                 'battery': battery_pct,
                 'charging': is_charging,
@@ -191,6 +260,14 @@ class MouseController:
                 'motion_sync': motion_sync,
                 'angle_snapping': angle_snapping,
                 'ripple': ripple,
+                'rgb_effect': rgb_effect,
+                'rgb_brightness': rgb_brightness,
+                'rgb_speed': rgb_speed,
+                'rgb_color': rgb_color,
+                'debounce': debounce,
+                'sleep_code': sleep_code,
+                'stage_colors': stage_colors,
+                'key_matrix': key_matrix,
                 'is_wired': self.is_wired,
                 'pid': self.current_pid
             }
@@ -248,6 +325,68 @@ class MouseController:
             buf[4] = mask
             return self._send(buf)
 
+    def set_rgb(self, effect, brightness, speed, color):
+        with self.lock:
+            if not self.connect():
+                return False
+            buf = bytearray(65)
+            buf[1] = self.OP_SET_RGB
+            buf[2] = 0x00
+            buf[3] = effect & 0xFF
+            buf[4] = brightness & 0xFF
+            buf[5] = speed & 0xFF
+            buf[6] = color & 0xFF
+            return self._send(buf)
+
+    def set_dpi_color(self, stage_idx, r, g, b):
+        with self.lock:
+            if not self.connect():
+                return False
+            buf = bytearray(65)
+            buf[1] = self.OP_SET_DPI_COLOR
+            buf[2] = 0x00
+            buf[3] = stage_idx & 0xFF
+            buf[4] = r & 0xFF
+            buf[5] = g & 0xFF
+            buf[6] = b & 0xFF
+            return self._send(buf)
+
+    def set_key_debounce(self, ms):
+        with self.lock:
+            if not self.connect():
+                return False
+            buf = bytearray(65)
+            buf[1] = self.OP_SET_KEY_DEBOUNCE
+            buf[2] = 0x00
+            buf[3] = 0x00
+            buf[4] = ms & 0xFF
+            return self._send(buf)
+
+    def set_sleep_time(self, code):
+        with self.lock:
+            if not self.connect():
+                return False
+            buf = bytearray(65)
+            buf[1] = self.OP_SET_SLEEP_TIME
+            buf[2] = 0x00
+            buf[3] = 0x00
+            buf[4] = code & 0xFF
+            return self._send(buf)
+
+    def set_key_binding(self, key_idx, key_class, val1, val2, val3):
+        with self.lock:
+            if not self.connect():
+                return False
+            buf = bytearray(65)
+            buf[1] = self.OP_SET_KEY_MATRIX
+            buf[2] = 0x00
+            buf[3] = key_idx & 0xFF
+            buf[4] = val3 & 0xFF
+            buf[5] = val2 & 0xFF
+            buf[6] = val1 & 0xFF
+            buf[7] = key_class & 0xFF
+            return self._send(buf)
+
 
 class TelemetryWorker(QThread):
     state_updated = pyqtSignal(dict)
@@ -278,7 +417,7 @@ class TelemetryWorker(QThread):
                 self.last_connected = connected
                 self.last_pid = pid
 
-            time.sleep(1.0)
+            time.sleep(1.2)
 
     def stop(self):
         self.running = False
@@ -367,6 +506,47 @@ class PlaqueButton(QPushButton):
             p.setPen(COLOR_TEXT)
         else:
             p.fillRect(0, 0, w, h, COLOR_SURFACE)
+            p.setPen(QPen(COLOR_BORDER, 1))
+            p.drawRect(0, 0, w - 1, h - 1)
+            p.setPen(COLOR_TEXT_MUTED)
+
+        p.setFont(self.font())
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+        p.end()
+
+
+class NavTabButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.is_active = False
+        font = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
+        font.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+        self.setFont(font)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(24)
+
+    def setActive(self, active):
+        self.is_active = active
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        w = self.width()
+        h = self.height()
+
+        if self.is_active:
+            p.fillRect(0, 0, w, h, COLOR_ACCENT)
+            p.setPen(QPen(COLOR_TEXT, 1))
+            p.drawRect(0, 0, w - 1, h - 1)
+            p.setPen(COLOR_TEXT)
+        elif self.underMouse():
+            p.fillRect(0, 0, w, h, QColor(28, 28, 36))
+            p.setPen(QPen(COLOR_TEXT, 1))
+            p.drawRect(0, 0, w - 1, h - 1)
+            p.setPen(COLOR_TEXT)
+        else:
+            p.fillRect(0, 0, w, h, QColor(14, 14, 18))
             p.setPen(QPen(COLOR_BORDER, 1))
             p.drawRect(0, 0, w - 1, h - 1)
             p.setPen(COLOR_TEXT_MUTED)
@@ -497,17 +677,17 @@ class ToggleRow(QFrame):
         layout.setSpacing(6)
 
         self.title_lbl = QLabel(title, self)
-        font_t = QFont("Cascadia Mono", 9, QFont.Weight.Bold)
+        font_t = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
         font_t.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
         self.title_lbl.setFont(font_t)
         self.title_lbl.setStyleSheet("color: #FFFFFF;")
         layout.addWidget(self.title_lbl, 1)
 
         self.status_btn = QPushButton("[ OFF ]", self)
-        font_btn = QFont("Cascadia Mono", 9, QFont.Weight.Bold)
+        font_btn = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
         font_btn.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
         self.status_btn.setFont(font_btn)
-        self.status_btn.setFixedSize(80, 22)
+        self.status_btn.setFixedSize(70, 20)
         self.status_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.status_btn.clicked.connect(self.on_clicked)
         layout.addWidget(self.status_btn, 0)
@@ -532,21 +712,48 @@ class ToggleRow(QFrame):
             self.status_btn.setStyleSheet("background: transparent; color: #FF1E1E; border: none; text-align: right;")
 
 
-class ConsoleFrame(QFrame):
-    def __init__(self, parent=None):
+class ColorSwatchButton(QPushButton):
+    color_chosen = pyqtSignal(QColor)
+
+    def __init__(self, color=QColor(0, 255, 65), parent=None):
         super().__init__(parent)
+        self.swatch_color = color
+        self.setFixedSize(22, 22)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clicked.connect(self.pick_color)
+
+    def set_color(self, color):
+        self.swatch_color = color
+        self.update()
+
+    def pick_color(self):
+        c = QColorDialog.getColor(self.swatch_color, self, "SELECT DPI LED COLOR")
+        if c.isValid():
+            self.swatch_color = c
+            self.update()
+            self.color_chosen.emit(c)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         w = self.width()
         h = self.height()
-
-        p.fillRect(0, 0, w, h, COLOR_PANEL)
+        p.fillRect(0, 0, w, h, self.swatch_color)
         p.setPen(QPen(COLOR_BORDER, 1))
         p.drawRect(0, 0, w - 1, h - 1)
         p.end()
 
+
+class ConsoleFrame(QFrame):
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        w = self.width()
+        h = self.height()
+        p.fillRect(0, 0, w, h, COLOR_PANEL)
+        p.setPen(QPen(COLOR_BORDER, 1))
+        p.drawRect(0, 0, w - 1, h - 1)
+        p.end()
 
 
 class MainWindow(QMainWindow):
@@ -569,6 +776,14 @@ class MainWindow(QMainWindow):
         self.ripple = False
         self.is_log_expanded = False
 
+        self.rgb_effect = 0
+        self.rgb_brightness = 0x7f
+        self.rgb_speed = 3
+        self.rgb_color = 1
+        self.debounce_ms = 4
+        self.sleep_code = 1
+        self.stage_colors = [(0, 255, 65)] * 6
+
         self.init_window()
         self.init_ui()
         self.init_tray()
@@ -580,8 +795,8 @@ class MainWindow(QMainWindow):
 
     def init_window(self):
         self.setWindowTitle("MAD G Hub")
-        self.setMinimumSize(490, 360)
-        self.resize(510, 380)
+        self.setMinimumSize(540, 390)
+        self.resize(550, 410)
 
         self.setStyleSheet("""
             QMainWindow {
@@ -598,6 +813,26 @@ class MainWindow(QMainWindow):
                 padding: 4px 6px;
                 font-family: 'Cascadia Mono', monospace;
                 font-size: 10px;
+            }
+            QComboBox {
+                background-color: #141418;
+                color: #FFFFFF;
+                border: 1px solid #303036;
+                padding: 3px 6px;
+                font-family: 'Cascadia Mono', monospace;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 16px;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0E0E10;
+                color: #FFFFFF;
+                selection-background-color: #0026FF;
+                selection-color: #FFFFFF;
+                border: 1px solid #303036;
             }
             QScrollBar:vertical {
                 background: #000000;
@@ -618,11 +853,13 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(8, 8, 8, 8)
         root_layout.setSpacing(6)
 
+        # Header Frame
         header_frame = QFrame(self)
-        header_frame.setFixedHeight(36)
+        header_frame.setFixedHeight(38)
         header_frame.setStyleSheet("background-color: #0E0E10; border: 1px solid #303036;")
         h_layout = QHBoxLayout(header_frame)
         h_layout.setContentsMargins(8, 4, 8, 4)
+        h_layout.setSpacing(8)
 
         face_badge = QLabel("[X_X]", self)
         font_b = QFont("Cascadia Mono", 9, QFont.Weight.Bold)
@@ -638,6 +875,16 @@ class MainWindow(QMainWindow):
 
         h_layout.addWidget(face_badge)
         h_layout.addWidget(title_lbl)
+
+        # Nav Tabs
+        self.nav_btns = []
+        self.tab_names = ["SENSOR", "LIGHTING", "HARDWARE", "KEYS"]
+        for idx, tname in enumerate(self.tab_names):
+            tbtn = NavTabButton(tname, header_frame)
+            tbtn.clicked.connect(lambda ch, i=idx: self.switch_tab(i))
+            self.nav_btns.append(tbtn)
+            h_layout.addWidget(tbtn)
+
         h_layout.addStretch()
 
         self.status_badge = QLabel("● CONNECTED", self)
@@ -652,145 +899,15 @@ class MainWindow(QMainWindow):
         h_layout.addWidget(self.bat_lbl)
         root_layout.addWidget(header_frame)
 
-        grid_layout = QHBoxLayout()
-        grid_layout.setSpacing(6)
+        # Tab Stacked Widget
+        self.stack = QStackedWidget(self)
+        self.build_sensor_tab()
+        self.build_lighting_tab()
+        self.build_hardware_tab()
+        self.build_keys_tab()
+        root_layout.addWidget(self.stack, 1)
 
-        # Left Column: CPI & LOD
-        left_card = CardFrame("// CPI", parent=self)
-        left_layout = QVBoxLayout(left_card)
-        left_layout.setContentsMargins(8, 16, 8, 8)
-        left_layout.setSpacing(6)
-
-        cpi_row = QHBoxLayout()
-        self.cpi_num_lbl = QLabel(f"{self.current_dpi}", self)
-        font_cpi = QFont("Impact", 28)
-        font_cpi.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
-        self.cpi_num_lbl.setFont(font_cpi)
-        self.cpi_num_lbl.setStyleSheet("color: #FFFFFF; margin: 0; padding: 0;")
-
-        cpi_sub = QLabel("CPI", self)
-        font_sub = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
-        font_sub.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
-        cpi_sub.setFont(font_sub)
-        cpi_sub.setStyleSheet("color: #FFFFFF; background-color: #0026FF; padding: 1px 4px;")
-
-        cpi_row.addWidget(self.cpi_num_lbl)
-        cpi_row.addWidget(cpi_sub, 0, Qt.AlignmentFlag.AlignVCenter)
-        cpi_row.addStretch()
-
-        btn_minus = QPushButton("[-50]", self)
-        btn_plus = QPushButton("[+50]", self)
-        for b in (btn_minus, btn_plus):
-            b.setFixedSize(40, 20)
-            b.setFont(QFont("Cascadia Mono", 7, QFont.Weight.Bold))
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet("background-color: #141418; color: #FFFFFF; border: 1px solid #303036;")
-        btn_minus.clicked.connect(lambda: self.nudge_dpi(-50))
-        btn_plus.clicked.connect(lambda: self.nudge_dpi(50))
-        cpi_row.addWidget(btn_minus)
-        cpi_row.addWidget(btn_plus)
-        left_layout.addLayout(cpi_row)
-
-        self.seg_cpi = SegmentedCpiSlider(left_card)
-        self.seg_cpi.set_cpi(self.current_dpi)
-        self.seg_cpi.cpi_changed.connect(self.apply_dpi)
-        left_layout.addWidget(self.seg_cpi)
-
-        presets_grid = QGridLayout()
-        presets_grid.setSpacing(4)
-        self.preset_btns = {}
-        preset_vals = [400, 800, 1200, 1600, 2400, 3200, 6400, 12000]
-        for idx, p_val in enumerate(preset_vals):
-            btn = PlaqueButton(str(p_val), left_card)
-            btn.clicked.connect(lambda ch, v=p_val: self.apply_dpi(v))
-            self.preset_btns[p_val] = btn
-            r = idx // 4
-            c = idx % 4
-            presets_grid.addWidget(btn, r, c)
-        left_layout.addLayout(presets_grid)
-        self.update_preset_buttons(self.current_dpi)
-
-        lod_row = QHBoxLayout()
-        lod_row.setSpacing(4)
-        lod_lbl = QLabel("// LOD:", left_card)
-        font_l = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
-        font_l.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
-        lod_lbl.setFont(font_l)
-        lod_lbl.setStyleSheet("color: #A5A5AC;")
-        lod_row.addWidget(lod_lbl)
-
-        self.btn_lod_1 = PlaqueButton("1.0 MM", left_card)
-        self.btn_lod_2 = PlaqueButton("2.0 MM", left_card)
-        self.btn_lod_1.clicked.connect(lambda: self.apply_lod(1))
-        self.btn_lod_2.clicked.connect(lambda: self.apply_lod(2))
-        lod_row.addWidget(self.btn_lod_1)
-        lod_row.addWidget(self.btn_lod_2)
-        left_layout.addLayout(lod_row)
-
-        grid_layout.addWidget(left_card, 1)
-
-        # Right Column: Polling Rate & DSP Options
-        right_vbox = QVBoxLayout()
-        right_vbox.setSpacing(6)
-
-        rate_card = CardFrame("// USB CLOCK", parent=self)
-        rate_layout = QVBoxLayout(rate_card)
-        rate_layout.setContentsMargins(8, 14, 8, 6)
-        rate_layout.setSpacing(4)
-
-        self.rate_info_lbl = QLabel(f"CYCLE: 1.0ms // {self.current_rate} Hz", self)
-        self.rate_info_lbl.setFont(QFont("Cascadia Mono", 7))
-        self.rate_info_lbl.setStyleSheet("color: #A5A5AC;")
-        rate_layout.addWidget(self.rate_info_lbl)
-
-        self.pixel_canvas = PulseWaveWidget(rate_card)
-        self.pixel_canvas.setFixedHeight(26)
-        rate_layout.addWidget(self.pixel_canvas)
-
-        rate_btn_row = QHBoxLayout()
-        rate_btn_row.setSpacing(3)
-        self.rate_btns = {}
-        for r_hz in [125, 250, 500, 1000]:
-            btn = PlaqueButton(f"{r_hz}", rate_card)
-            btn.clicked.connect(lambda ch, r=r_hz: self.apply_polling_rate(r))
-            self.rate_btns[r_hz] = btn
-            rate_btn_row.addWidget(btn)
-        rate_layout.addLayout(rate_btn_row)
-        self.update_rate_buttons(self.current_rate)
-        right_vbox.addWidget(rate_card)
-
-        dsp_card = CardFrame("// DSP SETTINGS", parent=self)
-        dsp_layout = QVBoxLayout(dsp_card)
-        dsp_layout.setContentsMargins(8, 14, 8, 6)
-        dsp_layout.setSpacing(3)
-
-        self.sw_motion = ToggleRow(
-            "MOTION SYNC",
-            "Realtime sensor-to-USB report clock synchronization",
-            dsp_card
-        )
-        self.sw_snap = ToggleRow(
-            "ANGLE SNAPPING",
-            "Directional drift suppression and angle lock",
-            dsp_card
-        )
-        self.sw_ripple = ToggleRow(
-            "RIPPLE CONTROL",
-            "Jitter smoothing at high CPI",
-            dsp_card
-        )
-
-        self.sw_motion.toggled.connect(self.on_flags_changed)
-        self.sw_snap.toggled.connect(self.on_flags_changed)
-        self.sw_ripple.toggled.connect(self.on_flags_changed)
-
-        dsp_layout.addWidget(self.sw_motion)
-        dsp_layout.addWidget(self.sw_snap)
-        dsp_layout.addWidget(self.sw_ripple)
-        right_vbox.addWidget(dsp_card)
-
-        grid_layout.addLayout(right_vbox, 1)
-        root_layout.addLayout(grid_layout)
+        self.switch_tab(0)
 
         # Bottom Drawer: Telemetry / Logs
         drawer_frame = QFrame(self)
@@ -858,26 +975,412 @@ class MainWindow(QMainWindow):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
-            QScrollBar:horizontal {
-                background: #090A0D;
-                height: 6px;
-                margin: 0px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #282830;
-                min-width: 16px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #0026FF;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                width: 0px;
-            }
         """)
         c_layout.addWidget(self.log_edit)
         root_layout.addWidget(self.console_container)
 
-        self.log_cli("device ready: paw3395")
+        self.log_cli("device ready: paw3395 (compx/holtek)")
+
+    def switch_tab(self, index):
+        self.stack.setCurrentIndex(index)
+        for i, b in enumerate(self.nav_btns):
+            b.setActive(i == index)
+
+    def build_sensor_tab(self):
+        page = QWidget()
+        grid_layout = QHBoxLayout(page)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(6)
+
+        # Left Column: CPI & LOD
+        left_card = CardFrame("// CPI", parent=page)
+        left_layout = QVBoxLayout(left_card)
+        left_layout.setContentsMargins(8, 16, 8, 8)
+        left_layout.setSpacing(6)
+
+        cpi_row = QHBoxLayout()
+        self.cpi_num_lbl = QLabel(f"{self.current_dpi}", page)
+        font_cpi = QFont("Impact", 28)
+        font_cpi.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+        self.cpi_num_lbl.setFont(font_cpi)
+        self.cpi_num_lbl.setStyleSheet("color: #FFFFFF; margin: 0; padding: 0;")
+
+        cpi_sub = QLabel("CPI", page)
+        font_sub = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
+        font_sub.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+        cpi_sub.setFont(font_sub)
+        cpi_sub.setStyleSheet("color: #FFFFFF; background-color: #0026FF; padding: 1px 4px;")
+
+        cpi_row.addWidget(self.cpi_num_lbl)
+        cpi_row.addWidget(cpi_sub, 0, Qt.AlignmentFlag.AlignVCenter)
+        cpi_row.addStretch()
+
+        btn_minus = QPushButton("[-50]", page)
+        btn_plus = QPushButton("[+50]", page)
+        for b in (btn_minus, btn_plus):
+            b.setFixedSize(40, 20)
+            b.setFont(QFont("Cascadia Mono", 7, QFont.Weight.Bold))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet("background-color: #141418; color: #FFFFFF; border: 1px solid #303036;")
+        btn_minus.clicked.connect(lambda: self.nudge_dpi(-50))
+        btn_plus.clicked.connect(lambda: self.nudge_dpi(50))
+        cpi_row.addWidget(btn_minus)
+        cpi_row.addWidget(btn_plus)
+        left_layout.addLayout(cpi_row)
+
+        self.seg_cpi = SegmentedCpiSlider(left_card)
+        self.seg_cpi.set_cpi(self.current_dpi)
+        self.seg_cpi.cpi_changed.connect(self.apply_dpi)
+        left_layout.addWidget(self.seg_cpi)
+
+        presets_grid = QGridLayout()
+        presets_grid.setSpacing(4)
+        self.preset_btns = {}
+        preset_vals = [400, 800, 1200, 1600, 2400, 3200, 6400, 12000]
+        for idx, p_val in enumerate(preset_vals):
+            btn = PlaqueButton(str(p_val), left_card)
+            btn.clicked.connect(lambda ch, v=p_val: self.apply_dpi(v))
+            self.preset_btns[p_val] = btn
+            r = idx // 4
+            c = idx % 4
+            presets_grid.addWidget(btn, r, c)
+        left_layout.addLayout(presets_grid)
+        self.update_preset_buttons(self.current_dpi)
+
+        lod_row = QHBoxLayout()
+        lod_row.setSpacing(4)
+        lod_lbl = QLabel("// LOD:", left_card)
+        font_l = QFont("Cascadia Mono", 8, QFont.Weight.Bold)
+        font_l.setStyleStrategy(QFont.StyleStrategy.NoAntialias)
+        lod_lbl.setFont(font_l)
+        lod_lbl.setStyleSheet("color: #A5A5AC;")
+        lod_row.addWidget(lod_lbl)
+
+        self.btn_lod_1 = PlaqueButton("1.0 MM", left_card)
+        self.btn_lod_2 = PlaqueButton("2.0 MM", left_card)
+        self.btn_lod_1.clicked.connect(lambda: self.apply_lod(1))
+        self.btn_lod_2.clicked.connect(lambda: self.apply_lod(2))
+        lod_row.addWidget(self.btn_lod_1)
+        lod_row.addWidget(self.btn_lod_2)
+        left_layout.addLayout(lod_row)
+
+        grid_layout.addWidget(left_card, 1)
+
+        # Right Column: Polling Rate & DSP Options
+        right_vbox = QVBoxLayout()
+        right_vbox.setSpacing(6)
+
+        rate_card = CardFrame("// USB CLOCK", parent=page)
+        rate_layout = QVBoxLayout(rate_card)
+        rate_layout.setContentsMargins(8, 14, 8, 6)
+        rate_layout.setSpacing(4)
+
+        self.rate_info_lbl = QLabel(f"CYCLE: 1.0ms // {self.current_rate} Hz", page)
+        self.rate_info_lbl.setFont(QFont("Cascadia Mono", 7))
+        self.rate_info_lbl.setStyleSheet("color: #A5A5AC;")
+        rate_layout.addWidget(self.rate_info_lbl)
+
+        self.pixel_canvas = PulseWaveWidget(rate_card)
+        self.pixel_canvas.setFixedHeight(26)
+        rate_layout.addWidget(self.pixel_canvas)
+
+        rate_btn_row = QHBoxLayout()
+        rate_btn_row.setSpacing(3)
+        self.rate_btns = {}
+        for r_hz in [125, 250, 500, 1000]:
+            btn = PlaqueButton(f"{r_hz}", rate_card)
+            btn.clicked.connect(lambda ch, r=r_hz: self.apply_polling_rate(r))
+            self.rate_btns[r_hz] = btn
+            rate_btn_row.addWidget(btn)
+        rate_layout.addLayout(rate_btn_row)
+        self.update_rate_buttons(self.current_rate)
+        right_vbox.addWidget(rate_card)
+
+        dsp_card = CardFrame("// DSP SETTINGS", parent=page)
+        dsp_layout = QVBoxLayout(dsp_card)
+        dsp_layout.setContentsMargins(8, 14, 8, 6)
+        dsp_layout.setSpacing(3)
+
+        self.sw_motion = ToggleRow(
+            "MOTION SYNC",
+            "Realtime sensor-to-USB report clock synchronization",
+            dsp_card
+        )
+        self.sw_snap = ToggleRow(
+            "ANGLE SNAPPING",
+            "Directional drift suppression and angle lock",
+            dsp_card
+        )
+        self.sw_ripple = ToggleRow(
+            "RIPPLE CONTROL",
+            "Jitter smoothing at high CPI",
+            dsp_card
+        )
+
+        self.sw_motion.toggled.connect(self.on_flags_changed)
+        self.sw_snap.toggled.connect(self.on_flags_changed)
+        self.sw_ripple.toggled.connect(self.on_flags_changed)
+
+        dsp_layout.addWidget(self.sw_motion)
+        dsp_layout.addWidget(self.sw_snap)
+        dsp_layout.addWidget(self.sw_ripple)
+        right_vbox.addWidget(dsp_card)
+
+        grid_layout.addLayout(right_vbox, 1)
+        self.stack.addWidget(page)
+
+    def build_lighting_tab(self):
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # Left: Mouse RGB Engine
+        rgb_card = CardFrame("// RGB ENGINE", parent=page)
+        rgb_vbox = QVBoxLayout(rgb_card)
+        rgb_vbox.setContentsMargins(8, 16, 8, 8)
+        rgb_vbox.setSpacing(6)
+
+        lbl_mode = QLabel("// EFFECT MODE:", page)
+        lbl_mode.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+        lbl_mode.setStyleSheet("color: #A5A5AC;")
+        rgb_vbox.addWidget(lbl_mode)
+
+        self.effect_btns = {}
+        effects = [("OFF", 0), ("STATIC", 1), ("BREATHE", 2), ("NEON", 3), ("CLICK", 4)]
+        effect_row = QHBoxLayout()
+        effect_row.setSpacing(4)
+        for name, code in effects:
+            btn = PlaqueButton(name, rgb_card)
+            btn.clicked.connect(lambda ch, c=code: self.apply_rgb_effect(c))
+            self.effect_btns[code] = btn
+            effect_row.addWidget(btn)
+        rgb_vbox.addLayout(effect_row)
+
+        lbl_bright = QLabel("// BRIGHTNESS:", page)
+        lbl_bright.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+        lbl_bright.setStyleSheet("color: #A5A5AC;")
+        rgb_vbox.addWidget(lbl_bright)
+
+        self.bright_btns = {}
+        bright_levels = [("10%", 0x10), ("25%", 0x3f), ("50%", 0x7f), ("75%", 0xbf), ("100%", 0xff)]
+        bright_row = QHBoxLayout()
+        bright_row.setSpacing(4)
+        for name, val in bright_levels:
+            btn = PlaqueButton(name, rgb_card)
+            btn.clicked.connect(lambda ch, v=val: self.apply_rgb_brightness(v))
+            self.bright_btns[val] = btn
+            bright_row.addWidget(btn)
+        rgb_vbox.addLayout(bright_row)
+
+        lbl_speed = QLabel("// SPEED:", page)
+        lbl_speed.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+        lbl_speed.setStyleSheet("color: #A5A5AC;")
+        rgb_vbox.addWidget(lbl_speed)
+
+        self.speed_btns = {}
+        speed_row = QHBoxLayout()
+        speed_row.setSpacing(4)
+        for s in [1, 2, 3, 4, 5]:
+            btn = PlaqueButton(f"SPD {s}", rgb_card)
+            btn.clicked.connect(lambda ch, sp=s: self.apply_rgb_speed(sp))
+            self.speed_btns[s] = btn
+            speed_row.addWidget(btn)
+        rgb_vbox.addLayout(speed_row)
+
+        lbl_pal = QLabel("// COLOR PALETTE:", page)
+        lbl_pal.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+        lbl_pal.setStyleSheet("color: #A5A5AC;")
+        rgb_vbox.addWidget(lbl_pal)
+
+        palette_row = QHBoxLayout()
+        palette_row.setSpacing(4)
+        colors = [
+            QColor(255, 0, 0), QColor(255, 122, 0), QColor(226, 236, 52),
+            QColor(0, 255, 65), QColor(0, 240, 255), QColor(0, 38, 255),
+            QColor(140, 86, 241), QColor(255, 255, 255)
+        ]
+        for c_idx, clr in enumerate(colors):
+            c_btn = QPushButton(page)
+            c_btn.setFixedSize(22, 22)
+            c_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            c_btn.setStyleSheet(f"background-color: {clr.name()}; border: 1px solid #303036;")
+            c_btn.clicked.connect(lambda ch, ci=c_idx+1: self.apply_rgb_color(ci))
+            palette_row.addWidget(c_btn)
+        rgb_vbox.addLayout(palette_row)
+
+        layout.addWidget(rgb_card, 1)
+
+        # Right: DPI Stage LED Colors
+        dpi_led_card = CardFrame("// DPI STAGE LED", parent=page)
+        dpi_vbox = QVBoxLayout(dpi_led_card)
+        dpi_vbox.setContentsMargins(8, 16, 8, 8)
+        dpi_vbox.setSpacing(6)
+
+        info_lbl = QLabel("// INDIVIDUAL STAGE INDICATOR COLORS", page)
+        info_lbl.setFont(QFont("Cascadia Mono", 7))
+        info_lbl.setStyleSheet("color: #A5A5AC;")
+        dpi_vbox.addWidget(info_lbl)
+
+        self.stage_swatches = []
+        stages_grid = QGridLayout()
+        stages_grid.setSpacing(6)
+
+        stage_default_cpi = [400, 800, 1600, 2400, 3200, 6400]
+        for s in range(6):
+            lbl_s = QLabel(f"STAGE {s+1} [{stage_default_cpi[s]}]", page)
+            lbl_s.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+            lbl_s.setStyleSheet("color: #FFFFFF;")
+
+            swatch = ColorSwatchButton(QColor(0, 255, 65), page)
+            swatch.color_chosen.connect(lambda clr, st=s: self.apply_stage_color(st, clr))
+            self.stage_swatches.append(swatch)
+
+            stages_grid.addWidget(lbl_s, s, 0)
+            stages_grid.addWidget(swatch, s, 1)
+
+        dpi_vbox.addLayout(stages_grid)
+        dpi_vbox.addStretch()
+        layout.addWidget(dpi_led_card, 1)
+
+        self.stack.addWidget(page)
+
+    def build_hardware_tab(self):
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # Left Column: Debounce & Sleep Timer
+        left_vbox = QVBoxLayout()
+        left_vbox.setSpacing(6)
+
+        deb_card = CardFrame("// KEY DEBOUNCE", parent=page)
+        deb_layout = QVBoxLayout(deb_card)
+        deb_layout.setContentsMargins(8, 16, 8, 8)
+        deb_layout.setSpacing(6)
+
+        deb_info = QLabel("// SWITCH FILTER DELAY (ANTI-CHATTER)", page)
+        deb_info.setFont(QFont("Cascadia Mono", 7))
+        deb_info.setStyleSheet("color: #A5A5AC;")
+        deb_layout.addWidget(deb_info)
+
+        self.deb_btns = {}
+        deb_row = QHBoxLayout()
+        deb_row.setSpacing(3)
+        for d in self.ctl.DEBOUNCE_VALS:
+            btn = PlaqueButton(f"{d}MS", deb_card)
+            btn.clicked.connect(lambda ch, ms=d: self.apply_debounce(ms))
+            self.deb_btns[d] = btn
+            deb_row.addWidget(btn)
+        deb_layout.addLayout(deb_row)
+        left_vbox.addWidget(deb_card)
+
+        sleep_card = CardFrame("// SLEEP TIMEOUT", parent=page)
+        slp_layout = QVBoxLayout(sleep_card)
+        slp_layout.setContentsMargins(8, 16, 8, 8)
+        slp_layout.setSpacing(6)
+
+        slp_info = QLabel("// MOTIONLESS AUTO-STANDBY TIMER", page)
+        slp_info.setFont(QFont("Cascadia Mono", 7))
+        slp_info.setStyleSheet("color: #A5A5AC;")
+        slp_layout.addWidget(slp_info)
+
+        self.slp_btns = {}
+        slp_row = QHBoxLayout()
+        slp_row.setSpacing(3)
+        for sec, code, label in self.ctl.SLEEP_CODES:
+            btn = PlaqueButton(label, sleep_card)
+            btn.clicked.connect(lambda ch, cd=code, sc=sec: self.apply_sleep_time(cd, sc))
+            self.slp_btns[code] = btn
+            slp_row.addWidget(btn)
+        slp_layout.addLayout(slp_row)
+        left_vbox.addWidget(sleep_card)
+
+        layout.addLayout(left_vbox, 1)
+
+        # Right Column: System & Hardware Telemetry
+        hw_card = CardFrame("// CONTROLLER INFO", parent=page)
+        hw_layout = QVBoxLayout(hw_card)
+        hw_layout.setContentsMargins(8, 16, 8, 8)
+        hw_layout.setSpacing(8)
+
+        self.hw_sensor_lbl = QLabel("SENSOR: PIXART PAW3395 (26000 CPI)", page)
+        self.hw_sensor_lbl.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+        self.hw_sensor_lbl.setStyleSheet("color: #FFFFFF;")
+
+        self.hw_mcu_lbl = QLabel("MCU: COMPX / HOLTEK HIGH-SPEED USB", page)
+        self.hw_mcu_lbl.setFont(QFont("Cascadia Mono", 8))
+        self.hw_mcu_lbl.setStyleSheet("color: #A5A5AC;")
+
+        self.hw_mode_lbl = QLabel("LINK: 2.4G WIRELESS DONGLE", page)
+        self.hw_mode_lbl.setFont(QFont("Cascadia Mono", 8))
+        self.hw_mode_lbl.setStyleSheet("color: #00FF41;")
+
+        self.hw_pid_lbl = QLabel("DEVICE ID: VID 0x373B // PID 0x100F", page)
+        self.hw_pid_lbl.setFont(QFont("Cascadia Mono", 8))
+        self.hw_pid_lbl.setStyleSheet("color: #A5A5AC;")
+
+        hw_layout.addWidget(self.hw_sensor_lbl)
+        hw_layout.addWidget(self.hw_mcu_lbl)
+        hw_layout.addWidget(self.hw_mode_lbl)
+        hw_layout.addWidget(self.hw_pid_lbl)
+        hw_layout.addStretch()
+
+        layout.addWidget(hw_card, 1)
+        self.stack.addWidget(page)
+
+    def build_keys_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        key_card = CardFrame("// KEY MATRIX REBINDING", parent=page)
+        k_layout = QVBoxLayout(key_card)
+        k_layout.setContentsMargins(8, 16, 8, 8)
+        k_layout.setSpacing(6)
+
+        info_lbl = QLabel("// REMAP 6 PHYSICAL SWITCHES VIA HARDWARE EEPROM", page)
+        info_lbl.setFont(QFont("Cascadia Mono", 7))
+        info_lbl.setStyleSheet("color: #A5A5AC;")
+        k_layout.addWidget(info_lbl)
+
+        self.key_combos = []
+        buttons_names = [
+            "BUTTON 1 [LEFT CLICK]",
+            "BUTTON 2 [RIGHT CLICK]",
+            "BUTTON 3 [MIDDLE CLICK]",
+            "BUTTON 4 [SIDE FORWARD]",
+            "BUTTON 5 [SIDE BACKWARD]",
+            "BUTTON 6 [DPI CYCLE]"
+        ]
+
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        for idx, bname in enumerate(buttons_names):
+            lbl = QLabel(bname, page)
+            lbl.setFont(QFont("Cascadia Mono", 8, QFont.Weight.Bold))
+            lbl.setStyleSheet("color: #FFFFFF;")
+
+            cb = QComboBox(page)
+            for title, kcls, v1, v2, v3 in self.ctl.KEY_BINDINGS:
+                cb.addItem(title, (kcls, v1, v2, v3))
+            cb.setCurrentIndex(idx if idx < len(self.ctl.KEY_BINDINGS) else 0)
+            cb.currentIndexChanged.connect(lambda c_idx, k=idx: self.on_key_bound(k, c_idx))
+            self.key_combos.append(cb)
+
+            row = idx // 2
+            col = (idx % 2) * 2
+            grid.addWidget(lbl, row, col)
+            grid.addWidget(cb, row, col + 1)
+
+        k_layout.addLayout(grid)
+        k_layout.addStretch()
+        layout.addWidget(key_card)
+
+        self.stack.addWidget(page)
 
     def toggle_console(self):
         self.is_log_expanded = not self.is_log_expanded
@@ -887,7 +1390,7 @@ class MainWindow(QMainWindow):
             self.resize(self.width(), self.height() + 146)
         else:
             self.btn_toggle_log.setText("[ + TELEMETRY ]")
-            self.resize(self.width(), max(360, self.height() - 146))
+            self.resize(self.width(), max(390, self.height() - 146))
 
     def log_cli(self, text, prefix="[+]"):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -936,8 +1439,43 @@ class MainWindow(QMainWindow):
         self.sw_snap.blockSignals(False)
         self.sw_ripple.blockSignals(False)
 
+        # Update RGB
+        self.rgb_effect = state['rgb_effect']
+        self.rgb_brightness = state['rgb_brightness']
+        self.rgb_speed = state['rgb_speed']
+        self.rgb_color = state['rgb_color']
+        self.update_rgb_buttons()
+
+        # Update Debounce & Sleep
+        self.debounce_ms = state['debounce']
+        for ms, b in self.deb_btns.items():
+            b.setActive(ms == self.debounce_ms)
+
+        self.sleep_code = state['sleep_code']
+        for code, b in self.slp_btns.items():
+            b.setActive(code == self.sleep_code)
+
+        # Update Stage colors
+        if 'stage_colors' in state and len(state['stage_colors']) == 6:
+            self.stage_colors = state['stage_colors']
+            for s, clr_tuple in enumerate(self.stage_colors):
+                self.stage_swatches[s].set_color(QColor(*clr_tuple))
+
+        # Hardware labels
+        bus_str = "USB DIRECT" if self.is_wired else "2.4G WIRELESS DONGLE"
+        self.hw_mode_lbl.setText(f"LINK: {bus_str}")
+        self.hw_pid_lbl.setText(f"DEVICE ID: VID 0x373B // PID 0x{self.current_pid:04X}")
+
         bus_name = "USB" if self.is_wired else "2.4G"
         self.tray.setToolTip(f"MAD G ({bus_name})\nBattery: {self.current_battery}% | {self.current_dpi} CPI")
+
+    def update_rgb_buttons(self):
+        for eff, b in self.effect_btns.items():
+            b.setActive(eff == self.rgb_effect)
+        for br, b in self.bright_btns.items():
+            b.setActive(br == self.rgb_brightness)
+        for sp, b in self.speed_btns.items():
+            b.setActive(sp == self.rgb_speed)
 
     def on_connection_changed(self, connected, pid, wired):
         self.is_connected = connected
@@ -947,10 +1485,8 @@ class MainWindow(QMainWindow):
         if connected:
             self.status_badge.setText("● CONNECTED")
             self.status_badge.setStyleSheet("color: #00FF41; background-color: #141418; border: 1px solid #303036; padding: 2px 6px;")
-            if wired:
-                self.log_cli(f"connected: direct usb (pid=0x{pid:04x})", "[*]")
-            else:
-                self.log_cli(f"connected: 2.4g wireless (pid=0x{pid:04x})", "[*]")
+            bus_type = "direct usb" if wired else "2.4g wireless"
+            self.log_cli(f"connected: {bus_type} (pid=0x{pid:04x})", "[*]")
         else:
             self.status_badge.setText("○ DISCONNECTED")
             self.status_badge.setStyleSheet("color: #FF1E1E; background-color: #141418; border: 1px solid #303036; padding: 2px 6px;")
@@ -965,7 +1501,6 @@ class MainWindow(QMainWindow):
         self.seg_cpi.set_cpi(val)
         self.cpi_num_lbl.setText(f"{val}")
         self.update_preset_buttons(val)
-
         self.log_cli(f"cpi set to {val} (stage={self.current_stage})")
         QTimer.singleShot(10, lambda: self._exec_set_dpi(val))
 
@@ -1006,6 +1541,55 @@ class MainWindow(QMainWindow):
         rip = self.sw_ripple.checked
         self.log_cli(f"dsp updated: motion_sync={ms}, angle_snap={snap}, ripple={rip}")
         QTimer.singleShot(10, lambda: self.ctl.set_special_options(ms, snap, rip))
+
+    def apply_rgb_effect(self, code):
+        self.rgb_effect = code
+        self.update_rgb_buttons()
+        self.log_cli(f"rgb effect set: {code}")
+        QTimer.singleShot(10, lambda: self.ctl.set_rgb(self.rgb_effect, self.rgb_brightness, self.rgb_speed, self.rgb_color))
+
+    def apply_rgb_brightness(self, val):
+        self.rgb_brightness = val
+        self.update_rgb_buttons()
+        self.log_cli(f"rgb brightness set: 0x{val:02x}")
+        QTimer.singleShot(10, lambda: self.ctl.set_rgb(self.rgb_effect, self.rgb_brightness, self.rgb_speed, self.rgb_color))
+
+    def apply_rgb_speed(self, val):
+        self.rgb_speed = val
+        self.update_rgb_buttons()
+        self.log_cli(f"rgb speed set: {val}")
+        QTimer.singleShot(10, lambda: self.ctl.set_rgb(self.rgb_effect, self.rgb_brightness, self.rgb_speed, self.rgb_color))
+
+    def apply_rgb_color(self, idx):
+        self.rgb_color = idx
+        self.log_cli(f"rgb color preset set: {idx}")
+        QTimer.singleShot(10, lambda: self.ctl.set_rgb(self.rgb_effect, self.rgb_brightness, self.rgb_speed, self.rgb_color))
+
+    def apply_stage_color(self, stage, color):
+        r, g, b = color.red(), color.green(), color.blue()
+        self.log_cli(f"dpi stage {stage+1} color set: rgb({r},{g},{b})")
+        QTimer.singleShot(10, lambda: self.ctl.set_dpi_color(stage, r, g, b))
+
+    def apply_debounce(self, ms):
+        self.debounce_ms = ms
+        for d, b in self.deb_btns.items():
+            b.setActive(d == ms)
+        self.log_cli(f"key debounce delay set: {ms}ms")
+        QTimer.singleShot(10, lambda: self.ctl.set_key_debounce(ms))
+
+    def apply_sleep_time(self, code, sec):
+        self.sleep_code = code
+        for c, b in self.slp_btns.items():
+            b.setActive(c == code)
+        self.log_cli(f"motionless sleep timeout set: {sec}s")
+        QTimer.singleShot(10, lambda: self.ctl.set_sleep_time(code))
+
+    def on_key_bound(self, key_idx, combo_idx):
+        data = self.key_combos[key_idx].itemData(combo_idx)
+        if data:
+            kcls, v1, v2, v3 = data
+            self.log_cli(f"button {key_idx+1} remapped to class=0x{kcls:02x}")
+            QTimer.singleShot(10, lambda: self.ctl.set_key_binding(key_idx, kcls, v1, v2, v3))
 
     def init_tray(self):
         self.tray = QSystemTrayIcon(self)
